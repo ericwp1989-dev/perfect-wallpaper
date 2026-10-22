@@ -188,20 +188,120 @@ def compose(picture: np.ndarray, placed: np.ndarray, plan: Plan, mode: str) -> n
     return canvas
 
 
-def _mirror(picture: np.ndarray, placed: np.ndarray, plan: Plan) -> np.ndarray:
-    """Mirror the picture into the gaps once at most. A tall picture on a very wide screen
-    would otherwise repeat like a kaleidoscope, so past one reflection the blurred
-    backdrop takes over, with a soft fade between the two."""
+def _gaps(plan: Plan) -> tuple[int, int, int, int]:
+    """The uncovered space on each side of the picture: left, right, top, bottom."""
     tw, th = plan.target
     x, y = plan.offset
     pw, ph = plan.size
-    gaps = (x, tw - pw - x, y, th - ph - y)  # left, right, top, bottom
-    pads = (min(gaps[0], pw), min(gaps[1], pw), min(gaps[2], ph), min(gaps[3], ph))
+    return x, tw - pw - x, y, th - ph - y
+
+
+def _one_reflection(plan: Plan) -> tuple[int, int, int, int]:
+    pw, ph = plan.size
+    gaps = _gaps(plan)
+    return min(gaps[0], pw), min(gaps[1], pw), min(gaps[2], ph), min(gaps[3], ph)
+
+
+def mirror_pads(picture: np.ndarray, plan: Plan) -> tuple[int, int, int, int]:
+    """How far Mirrored sides reflects the picture into each gap (left, right, top,
+    bottom), in screen pixels.
+
+    One reflection at most, and less when the strip that would be reflected holds the
+    outline of a large subject, such as a big star or a person near the side: the copy
+    would show a second, cut off subject at the end of the screen. The reflection then
+    stops in the calm part before the subject and the blurred backdrop takes over.
+    """
+    pads = _one_reflection(plan)
+    if not any(pads):
+        return pads
+    pw, ph = plan.size
+    gray = _calm_gray(picture)
+    left, right = _calm_reach(gray, pads[0] / pw, pads[1] / pw)
+    top, bottom = _calm_reach(np.ascontiguousarray(gray.T), pads[2] / ph, pads[3] / ph)
+    reach = (left * pw, right * pw, top * ph, bottom * ph)
+    return tuple(min(pad, int(r)) for pad, r in zip(pads, reach))
+
+
+def mirror_stops_short(picture: np.ndarray, plan: Plan) -> bool:
+    """Whether a large subject near an edge keeps Mirrored sides from filling the gaps
+    with a full reflection, so Blurred sides may look better."""
+    return mirror_pads(picture, plan) != _one_reflection(plan)
+
+
+_CALM_SIDE = 160       # short side of the small copy the subject check works on
+_OUTLINE = 0.008       # brightness change per pixel of that copy that counts as an outline
+_OUTLINE_RATIO = 3.5   # an outline must also be this many times the picture's calm level
+
+
+def _calm_gray(picture: np.ndarray) -> np.ndarray:
+    """A small, softened grayscale copy. Its size depends only on the picture's shape, so
+    the preview and the full size wallpaper make the same choice."""
+    h, w = picture.shape[:2]
+    s = _CALM_SIDE / min(w, h)
+    small = cv2.resize(picture, (max(1, round(w * s)), max(1, round(h * s))),
+                       interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
+    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255
+    return cv2.GaussianBlur(gray, (0, 0), 2.5)
+
+
+def _calm_reach(gray: np.ndarray, left: float, right: float) -> tuple[float, float]:
+    """How far in from its left and right edges gray can be mirrored, as fractions of its
+    width, looking only as far as the fractions asked for (1 means no limit).
+
+    A subject's outline is a strong brightness change that keeps the same direction for
+    a quarter of the height, like the rim of a star. Stars, grass, noise and other fine
+    texture average out, and so does a horizon, which mirrors without trouble. A picture
+    with outlines everywhere raises the bar, so only an edge that stands out counts.
+    """
+    h, w = gray.shape
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3) / 8
+    outline = np.abs(cv2.blur(gx, (1, max(3, h // 4)))).max(axis=0)
+    limit = max(_OUTLINE, _OUTLINE_RATIO * float(np.percentile(outline, 25)))
+    margin = 4  # stay clear of the glow just outside the outline
+    reach = []
+    for want, profile in ((left, outline), (right, outline[::-1])):
+        hits = np.flatnonzero(profile[:min(w, int(np.ceil(want * w)))] > limit)
+        reach.append(max(0, int(hits[0]) - margin) / w if hits.size else 1.0)
+    return reach[0], reach[1]
+
+
+def _mirror(picture: np.ndarray, placed: np.ndarray, plan: Plan) -> np.ndarray:
+    """Mirror the picture into the gaps once at most, and only up to any large subject
+    near an edge. A tall picture on a very wide screen would otherwise repeat like a
+    kaleidoscope, so past the reflection the blurred backdrop takes over, with a soft
+    fade between the two.
+
+    Where a subject cut the reflection short, the rest of that gap is a blur of the calm
+    edge strip instead, because the backdrop is the whole picture stretched, and it
+    would push a subject near the edge out into the gap as a big blurred copy."""
+    tw, th = plan.target
+    x, y = plan.offset
+    pw, ph = plan.size
+    gaps = _gaps(plan)
+    pads = mirror_pads(picture, plan)
     band = cv2.copyMakeBorder(placed, pads[2], pads[3], pads[0], pads[1], cv2.BORDER_REFLECT)
     if pads == gaps:
         return _soften_outside(band, plan)
 
     canvas = _blurred_backdrop(picture, (tw, th))
+    side = min(tw, th)
+    thin = max(2, min(pw, ph) // 50)  # the edge itself, when the subject touches it
+    for edge, (pad, whole) in enumerate(zip(pads, _one_reflection(plan))):
+        if pad >= whole:
+            continue
+        n, gap = max(pad, thin), gaps[edge]
+        # full brightness beside the picture, so there is no step where nothing is mirrored,
+        # and as dim as the backdrop at the edge of the screen
+        dim = np.linspace(0.6, 1, gap, dtype=np.float32)
+        if edge == 0:
+            canvas[y:y + ph, :x] = _blurred(cv2.flip(placed[:, :n], 1), (gap, ph), side, dim[None, :, None])
+        elif edge == 1:
+            canvas[y:y + ph, x + pw:] = _blurred(cv2.flip(placed[:, pw - n:], 1), (gap, ph), side,
+                                                 dim[None, ::-1, None])
+        elif edge == 2:
+            canvas[:y, x:x + pw] = _blurred(cv2.flip(placed[:n], 0), (pw, gap), side, dim[:, None, None])
+        else:
+            canvas[y + ph:, x:x + pw] = _blurred(cv2.flip(placed[ph - n:], 0), (pw, gap), side, dim[::-1, None, None])
     bh, bw = band.shape[:2]
     fade = max(8, min(tw, th) // 12)
     across, down = np.ones(bw, np.float32), np.ones(bh, np.float32)
@@ -226,16 +326,20 @@ def _mirror(picture: np.ndarray, placed: np.ndarray, plan: Plan) -> np.ndarray:
 
 def _blurred_backdrop(picture: np.ndarray, target) -> np.ndarray:
     """The picture stretched to fill the screen, heavily blurred and dimmed."""
-    tw, th = target
     h, w = picture.shape[:2]
     left, top, right, bottom = make_plan((w, h), target, "fill").crop
-    small = cv2.resize(
-        picture[top:bottom, left:right], (max(8, tw // 12), max(8, th // 12)), interpolation=cv2.INTER_AREA
-    )
+    return _blurred(picture[top:bottom, left:right], target, min(target))
+
+
+def _blurred(picture: np.ndarray, size, screen_side: int, dim=0.6) -> np.ndarray:
+    """picture stretched to size (width, height), heavily blurred and dimmed. dim may be
+    an array, to dim some parts more than others."""
+    w, h = size
+    small = cv2.resize(picture, (max(8, w // 12), max(8, h // 12)), interpolation=cv2.INTER_AREA)
     small = cv2.GaussianBlur(small, (0, 0), 3)
-    big = cv2.resize(small, (tw, th), interpolation=cv2.INTER_CUBIC)
-    big = cv2.GaussianBlur(big, (0, 0), max(2.0, min(tw, th) / 200))
-    return (big.astype(np.float32) * 0.6).astype(np.uint8)
+    big = cv2.resize(small, (w, h), interpolation=cv2.INTER_CUBIC)
+    big = cv2.GaussianBlur(big, (0, 0), max(2.0, screen_side / 200))
+    return (big.astype(np.float32) * dim).astype(np.uint8)
 
 
 def _soften_outside(canvas: np.ndarray, plan: Plan) -> np.ndarray:
