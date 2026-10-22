@@ -1,0 +1,6 @@
+# Only for scripts/convert_models.py, which makes the AI models from their authors'
+# original files. The CPU build of PyTorch is enough and much smaller.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+spandrel>=0.4
+pnnx>=20250530

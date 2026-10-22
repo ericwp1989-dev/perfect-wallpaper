@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+engine/
+*.spec
+
+# Local working files, not part of the project
+fit_wallpaper.py
+github-scan-notes.md
+notes/
+wallpaper_5120x1440.png

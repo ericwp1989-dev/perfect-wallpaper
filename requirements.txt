@@ -1,0 +1,6 @@
+ncnn>=1.0.20250503
+numpy>=2.0
+opencv-python>=4.10
+pillow>=11.0
+pillow-heif>=0.18
+tkinterdnd2>=0.4
