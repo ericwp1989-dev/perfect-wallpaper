@@ -11,3 +11,6 @@ fit_wallpaper.py
 github-scan-notes.md
 notes/
 wallpaper_5120x1440.png
+
+# Claude Code settings for this computer only
+.claude/settings.local.json

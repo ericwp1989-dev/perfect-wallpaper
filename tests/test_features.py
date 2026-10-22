@@ -62,6 +62,19 @@ class MirrorTests(unittest.TestCase):
         out = pipeline.preview(picture, pipeline.Settings(target=(600, 300), mode="mirror"), (600, 300))
         self.assertEqual(out.shape, (300, 600, 3))
 
+    def test_a_big_bright_subject_near_the_edge_is_not_copied_onto_the_side(self):
+        # a dark picture with a big bright disk near its left edge, like a star in space
+        picture = np.full((270, 640, 3), 12, np.uint8)
+        cv2.circle(picture, (200, 135), 90, (235, 235, 235), -1)
+        out = pipeline.preview(picture, pipeline.Settings(target=(1600, 360), mode="mirror"), (1600, 360))
+        self.assertEqual(out.shape, (360, 1600, 3))
+        # a full reflection would put a bright half disk in the outer half of the left side
+        self.assertLess(out[:, :180].max(), 60)
+        plan = fitting.make_plan((640, 270), (1600, 360), "mirror")
+        self.assertTrue(fitting.mirror_stops_short(picture, plan))
+        # plain texture still gets the whole reflection
+        self.assertFalse(fitting.mirror_stops_short(noise(640, 270), plan))
+
 
 class LookTests(unittest.TestCase):
     def test_nothing_changes_when_every_control_is_neutral(self):

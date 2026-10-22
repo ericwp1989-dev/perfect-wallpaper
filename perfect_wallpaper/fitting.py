@@ -197,6 +197,7 @@ def _gaps(plan: Plan) -> tuple[int, int, int, int]:
 
 
 def _one_reflection(plan: Plan) -> tuple[int, int, int, int]:
+    """How far a single reflection of the picture reaches into each gap."""
     pw, ph = plan.size
     gaps = _gaps(plan)
     return min(gaps[0], pw), min(gaps[1], pw), min(gaps[2], ph), min(gaps[3], ph)
@@ -206,10 +207,10 @@ def mirror_pads(picture: np.ndarray, plan: Plan) -> tuple[int, int, int, int]:
     """How far Mirrored sides reflects the picture into each gap (left, right, top,
     bottom), in screen pixels.
 
-    One reflection at most, and less when the strip that would be reflected holds the
-    outline of a large subject, such as a big star or a person near the side: the copy
-    would show a second, cut off subject at the end of the screen. The reflection then
-    stops in the calm part before the subject and the blurred backdrop takes over.
+    One reflection at most, and less when a large subject, such as a big star in dark
+    space, sits near the edge inside the strip that would be reflected: the copy would
+    show a second, cut off subject at the end of the screen. The reflection then stops
+    in the calm part before the subject and a blur of that calm part takes over.
     """
     pads = _one_reflection(plan)
     if not any(pads):
@@ -217,7 +218,7 @@ def mirror_pads(picture: np.ndarray, plan: Plan) -> tuple[int, int, int, int]:
     pw, ph = plan.size
     gray = _calm_gray(picture)
     left, right = _calm_reach(gray, pads[0] / pw, pads[1] / pw)
-    top, bottom = _calm_reach(np.ascontiguousarray(gray.T), pads[2] / ph, pads[3] / ph)
+    top, bottom = _calm_reach(gray.T, pads[2] / ph, pads[3] / ph)
     reach = (left * pw, right * pw, top * ph, bottom * ph)
     return tuple(min(pad, int(r)) for pad, r in zip(pads, reach))
 
@@ -228,9 +229,10 @@ def mirror_stops_short(picture: np.ndarray, plan: Plan) -> bool:
     return mirror_pads(picture, plan) != _one_reflection(plan)
 
 
-_CALM_SIDE = 160       # short side of the small copy the subject check works on
-_OUTLINE = 0.008       # brightness change per pixel of that copy that counts as an outline
-_OUTLINE_RATIO = 3.5   # an outline must also be this many times the picture's calm level
+_CALM_SIDE = 160   # short side of the small copy the subject check works on
+_CALM = 0.03       # average change in brightness (0 to 1) from the edge that is still calm
+_SUBJECT = 0.08    # a change this big is a subject, if it comes on quickly after a calm stretch
+_BIG = 0.2         # a quick change this big is a subject even right beside the edge
 
 
 def _calm_gray(picture: np.ndarray) -> np.ndarray:
@@ -241,27 +243,37 @@ def _calm_gray(picture: np.ndarray) -> np.ndarray:
     small = cv2.resize(picture, (max(1, round(w * s)), max(1, round(h * s))),
                        interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
     gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255
-    return cv2.GaussianBlur(gray, (0, 0), 2.5)
+    return cv2.GaussianBlur(gray, (0, 0), 4)
 
 
 def _calm_reach(gray: np.ndarray, left: float, right: float) -> tuple[float, float]:
     """How far in from its left and right edges gray can be mirrored, as fractions of its
     width, looking only as far as the fractions asked for (1 means no limit).
 
-    A subject's outline is a strong brightness change that keeps the same direction for
-    a quarter of the height, like the rim of a star. Stars, grass, noise and other fine
-    texture average out, and so does a horizon, which mirrors without trouble. A picture
-    with outlines everywhere raises the bar, so only an edge that stands out counts.
+    Each column is compared with the edge itself, row by row. A subject is a big change
+    that comes on within a short distance after a long calm stretch, like the rim of a
+    star after empty space. Landscapes change little by little and keep their whole
+    reflection, and stars, grass, noise and other fine texture are blurred away. Close
+    to the edge there is little calm to go by, so there the change must be bigger.
     """
     h, w = gray.shape
-    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3) / 8
-    outline = np.abs(cv2.blur(gx, (1, max(3, h // 4)))).max(axis=0)
-    limit = max(_OUTLINE, _OUTLINE_RATIO * float(np.percentile(outline, 25)))
-    margin = 4  # stay clear of the glow just outside the outline
+    short = min(h, w)
+    rise, settled = max(2, round(0.12 * short)), round(0.15 * short)
+    edge_width = max(2, round(0.03 * w))
     reach = []
-    for want, profile in ((left, outline), (right, outline[::-1])):
-        hits = np.flatnonzero(profile[:min(w, int(np.ceil(want * w)))] > limit)
-        reach.append(max(0, int(hits[0]) - margin) / w if hits.size else 1.0)
+    for want, side in ((left, gray), (right, gray[:, ::-1])):
+        n = min(w, int(np.ceil(want * w)))
+        edge = side[:, :edge_width].mean(axis=1, keepdims=True)
+        change = np.abs(side[:, :n] - edge).mean(axis=0)
+        reach.append(1.0)
+        subject = np.flatnonzero(change > _SUBJECT)
+        if subject.size:
+            start = subject[0]
+            calm = np.flatnonzero(change[:start] < _CALM)
+            last_calm = int(calm[-1]) if calm.size else 0
+            jump = change[min(n - 1, last_calm + rise)] - change[last_calm]
+            if start - last_calm <= rise and (last_calm >= settled or jump >= _BIG):
+                reach[-1] = last_calm / w
     return reach[0], reach[1]
 
 

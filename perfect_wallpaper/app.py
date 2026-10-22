@@ -619,6 +619,9 @@ class App:
         left, top, right, bottom = plan.crop
         if self.mode.get() == "fill" and (right - left < w or bottom - top < h):
             text += " Drag the preview to choose what stays in view."
+        if self.mode.get() == "mirror" and fitting.mirror_stops_short(self._rotated_small(), plan):
+            text += (" Something large sits near the edge of the picture, so the mirrored sides stop before it "
+                     "and fade into a blur instead of copying it. Blurred sides may look better here.")
         return text
 
     def _result_current(self) -> bool:
